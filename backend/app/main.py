@@ -1,5 +1,5 @@
 from fastapi import FastAPI
-from .routes import prediction
+from app.routes import prediction
 
-app = FastAPI(title="Stocksage API")
+app = FastAPI(title="StockSage API", version="0.1")
 app.include_router(prediction.router, prefix="/api/prediction")

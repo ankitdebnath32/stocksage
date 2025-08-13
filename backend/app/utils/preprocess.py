@@ -1,28 +1,25 @@
 import pandas as pd
 import numpy as np
 from typing import Tuple
-from .indicators import add_technical_indicators
- 
+from app.utils.indicators import add_technical_indicators
+
 def map_sentiment_label_to_score(label: str):
-    # Accepts 'positive','neutral','negative' or 1/0/-1
     if isinstance(label, (int, float)):
         return float(label)
     l = str(label).lower()
-    if l in ['positive', 'pos', '1']:
+    if l in ['positive', 'pos', '1', 'positive\n']:
         return 1.0
     if l in ['neutral', 'neu', '0']:
         return 0.0
-    if l in ['negative', 'neg', '-1']:
+    if l in ['negative', 'neg', '-1', 'negative\n']:
         return -1.0
     return 0.0
- 
+
 def aggregate_daily_sentiment(news_sentiment_df: pd.DataFrame, date_col='publishedAt', sentiment_col='sentiment'):
-    """
-    news_sentiment_df expected columns: publishedAt (ISO str or datetime), sentiment (label or numeric), optional confidence
-    Returns df with index = date (yyyy-mm-dd) and column sentiment_score (mean), sentiment_count
-    """
+    if news_sentiment_df is None or news_sentiment_df.empty:
+        return pd.DataFrame(columns=['sentiment_mean','sentiment_std','sentiment_count'])
+
     df = news_sentiment_df.copy()
-    # Ensure datetime
     df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
     df = df.dropna(subset=[date_col])
     df['date'] = df[date_col].dt.date
@@ -32,54 +29,50 @@ def aggregate_daily_sentiment(news_sentiment_df: pd.DataFrame, date_col='publish
         sentiment_std = ('sentiment_score', 'std'),
         sentiment_count = ('sentiment_score', 'count')
     ).reset_index()
+    if agg.empty:
+        return pd.DataFrame(columns=['sentiment_mean','sentiment_std','sentiment_count'])
     agg['date'] = pd.to_datetime(agg['date'])
     agg = agg.set_index('date').rename_axis('date')
     return agg
- 
-def build_feature_dataset(price_df: pd.DataFrame, sentiment_daily_df: pd.DataFrame, lookahead: int = 1) -> Tuple[pd.DataFrame, pd.Series]:
-    """
-    price_df: DataFrame from yfinance with Date index (datetime) and OHLCV columns
-    sentiment_daily_df: indexed by date (datetime) with columns sentiment_mean, sentiment_count...
-    lookahead: days ahead to predict (1 -> next-day)
-    Returns: X (features), y_class (binary up/down), y_reg (actual next-day return)
-    """
-    # Add indicators
+
+def build_feature_dataset(price_df: pd.DataFrame, sentiment_daily_df: pd.DataFrame, lookahead: int = 1) -> Tuple[pd.DataFrame, pd.Series, pd.Series, pd.DataFrame]:
     price_df = price_df.copy()
     if 'Date' in price_df.columns:
         price_df['Date'] = pd.to_datetime(price_df['Date'])
-        price_df.set_index('Date', inplace=True)
+        price_df = price_df.set_index('Date')
     price_df = price_df.sort_index()
     price_with_ind = add_technical_indicators(price_df)
- 
+
     # Align sentiment to price dates
     sentiment = sentiment_daily_df.copy()
-    # Reindex sentiment to business days and forward fill (so each trading day has the latest available sentiment)
-    sentiment_reindex = sentiment.reindex(price_with_ind.index.date, method='ffill')
-    sentiment_reindex.index = pd.to_datetime(sentiment_reindex.index)
-    sentiment_reindex.index.name = price_with_ind.index.name or 'Date'
-    # Join
+    if sentiment is None or sentiment.empty:
+        # create neutral sentiment index aligned to price dates
+        idx = price_with_ind.index
+        sentiment_reindex = pd.DataFrame(index=idx)
+        sentiment_reindex['sentiment_mean'] = 0.0
+        sentiment_reindex['sentiment_std'] = 0.0
+        sentiment_reindex['sentiment_count'] = 0
+        sentiment_reindex.index.name = price_with_ind.index.name or 'Date'
+    else:
+        # reindex sentiment to trading dates using forward fill
+        sentiment_reindex = sentiment.reindex(price_with_ind.index.date, method='ffill')
+        sentiment_reindex.index = pd.to_datetime(sentiment_reindex.index)
+        sentiment_reindex.index.name = price_with_ind.index.name or 'Date'
+
     df = price_with_ind.join(sentiment_reindex, how='left')
- 
-    # If sentiment NaN, fill with 0 (neutral) and count 0
-    if 'sentiment_mean' in df.columns:
-        df['sentiment_mean'] = df['sentiment_mean'].fillna(0.0)
-    else:
-        df['sentiment_mean'] = 0.0
-    if 'sentiment_count' in df.columns:
-        df['sentiment_count'] = df['sentiment_count'].fillna(0)
-    else:
-        df['sentiment_count'] = 0
- 
-    # Target: next-day return
+
+    # Fill defaults
+    df['sentiment_mean'] = df.get('sentiment_mean', 0.0).fillna(0.0)
+    df['sentiment_std'] = df.get('sentiment_std', 0.0).fillna(0.0)
+    df['sentiment_count'] = df.get('sentiment_count', 0).fillna(0)
+
+    # Target: future close and return
     df['FutureClose'] = df['Close'].shift(-lookahead)
     df['FutureReturn'] = (df['FutureClose'] - df['Close']) / df['Close']
-    # Binary target: 1 if next-day return > 0 else 0
     df['Target'] = (df['FutureReturn'] > 0).astype(int)
- 
-    # Drop last lookahead rows with NaN future
+
     df = df.dropna(subset=['FutureClose'])
- 
-    # Select features
+
     feature_cols = [
         'Open','High','Low','Close','Volume',
         'SMA_5','SMA_10','SMA_20',
@@ -88,14 +81,11 @@ def build_feature_dataset(price_df: pd.DataFrame, sentiment_daily_df: pd.DataFra
         'ATR_14','Return','LogReturn',
         'sentiment_mean','sentiment_std','sentiment_count'
     ]
-    # Keep only columns present
     feature_cols = [c for c in feature_cols if c in df.columns]
     X = df[feature_cols].copy()
     y_class = df['Target'].copy()
     y_reg = df['FutureReturn'].copy()
- 
-    # Optionally add lag features
+
     X['Close_minus_SMA5'] = X['Close'] - X.get('SMA_5', X['Close'])
-    # Fill any remaining NaNs
     X = X.fillna(method='ffill').fillna(method='bfill').fillna(0)
     return X, y_class, y_reg, df
