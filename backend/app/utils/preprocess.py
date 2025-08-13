@@ -59,6 +59,10 @@ def build_feature_dataset(price_df: pd.DataFrame, sentiment_daily_df: pd.DataFra
         sentiment_reindex.index = pd.to_datetime(sentiment_reindex.index)
         sentiment_reindex.index.name = price_with_ind.index.name or 'Date'
 
+    # Ensure both indexes are timezone-naive before joining
+    price_with_ind.index = price_with_ind.index.tz_localize(None)
+    sentiment_reindex.index = sentiment_reindex.index.tz_localize(None)
+
     df = price_with_ind.join(sentiment_reindex, how='left')
 
     # Fill defaults
